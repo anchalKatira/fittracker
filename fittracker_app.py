@@ -105,7 +105,7 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:var(--bg);c
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────
 DATA_FILE        = "fittracker_data.json"
-MODEL            = "llama-3.3-70b-versatile"
+MODEL            = "openai/gpt-oss-120b"
 XP_PER_LEVEL     = 50
 XP_PER_WORKOUT   = 10
 XP_PER_5_MINS    = 1
