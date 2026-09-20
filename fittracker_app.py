@@ -1,5 +1,5 @@
 """
-FitTracker — Day 4: Complete Streamlit App
+FitTracker - Complete Streamlit App
 ==========================================
 Tabs:
   1. 🏋️ Log Workout
@@ -7,19 +7,11 @@ Tabs:
   3. 🤖 AI Coach (Groq suggestions)
   4. 📊 Analytics (Plotly charts)
 
-Run locally:
-  streamlit run app.py
-
-Deploy on HuggingFace Spaces:
-  - Upload app.py + requirements.txt
-  - Add GROQ_API_KEY as a Secret
 """
 
 import os
-import json
 import math
-import copy
-import tempfile
+import time
 import streamlit as st
 from datetime import datetime, date, timedelta
 from typing import Optional
@@ -29,6 +21,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from groq import Groq
+
+# ── Storage layer (MySQL — see db.py) ────────────────────────
+from db import load_data, save_data, signup_user, login_user
 
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -104,8 +99,7 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:var(--bg);c
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────
-DATA_FILE        = "fittracker_data.json"
-MODEL            = "openai/gpt-oss-120b"
+MODEL            = "llama-3.1-8b-instant"
 XP_PER_LEVEL     = 50
 XP_PER_WORKOUT   = 10
 XP_PER_5_MINS    = 1
@@ -132,6 +126,8 @@ MUSCLE_COLORS = {
     "shoulders":"#f87171","arms":"#60a5fa","core":"#a78bfa","cardio":"#fb923c",
 }
 
+# Kept purely as a readable reference for the data shape db.py builds —
+# actual initialization now happens in db.py's init_schema().
 EMPTY_DB = {
     "user":{
         "name":"","goal":"","created_at":"",
@@ -154,18 +150,9 @@ EMPTY_DB = {
 # ─────────────────────────────────────────────────────────────
 # STORAGE
 # ─────────────────────────────────────────────────────────────
-def load_data() -> dict:
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE) as f:
-            return json.load(f)
-    data = copy.deepcopy(EMPTY_DB)
-    save_data(data)
-    return data
-
-
-def save_data(data: dict) -> None:
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+# load_data() / save_data() now come from db.py (MySQL-backed) —
+# same function names, same return shape, so nothing below this
+# line needed to change at all.
 
 
 # ─────────────────────────────────────────────────────────────
@@ -272,7 +259,48 @@ def log_workout(data: dict, exercises: list, duration: int, notes: str = "") -> 
 # AI COACH
 # ─────────────────────────────────────────────────────────────
 def get_groq_key() -> str:
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            return str(st.secrets["GROQ_API_KEY"])
+    except Exception:
+        pass
     return os.environ.get("GROQ_API_KEY","")
+
+
+def call_with_retry(fn, *args, max_retries: int = 2, backoff: float = 1.5, **kwargs):
+    """
+    Retry a flaky call (rate limit, timeout, transient network error) a
+    couple of times with increasing backoff before giving up. Raises the
+    last error if every attempt fails, so callers can decide the fallback.
+    """
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries:
+                time.sleep(backoff * (attempt + 1))
+    raise last_err
+
+
+FALLBACK_SUGGESTION = """SESSION FOCUS: Full Body (AI coach unavailable — showing a safe default plan)
+
+WARM UP (5 mins):
+- Jumping jacks / light jog: 5 min
+
+MAIN WORKOUT:
+- Bodyweight squats: 3×15 — Easy — Focus on depth and form
+- Push-ups: 3×10 — Medium — Keep core braced
+- Plank: 3×30s — Medium — Breathe steadily, don't hold your breath
+
+COOL DOWN (5 mins):
+- Full-body static stretch: 5 min
+
+COACH NOTE:
+Couldn't reach the AI coach right now, so this is a general safe session instead of a personalized one. Try generating a plan again in a bit — your data hasn't been lost."""
+
+FALLBACK_TIP = "Couldn't reach the AI coach right now — but a good rule of thumb: consistency beats intensity, so a shorter workout today still keeps your streak alive."
 
 
 def build_context(data: dict) -> str:
@@ -331,16 +359,21 @@ COOL DOWN (5 mins):
 COACH NOTE:
 [2-3 sentences of personalized advice]"""
 
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role":"system","content":"You are an expert personal trainer. Follow the format exactly."},
-            {"role":"user","content":prompt}
-        ],
-        max_tokens=700,
-        temperature=0.7,
-    )
-    suggestion = resp.choices[0].message.content
+    try:
+        resp = call_with_retry(
+            client.chat.completions.create,
+            model=MODEL,
+            messages=[
+                {"role":"system","content":"You are an expert personal trainer. Follow the format exactly."},
+                {"role":"user","content":prompt}
+            ],
+            max_tokens=700,
+            temperature=0.7,
+        )
+        suggestion = resp.choices[0].message.content
+    except Exception:
+        suggestion = FALLBACK_SUGGESTION
+
     data["latest_suggestion"] = {"text":suggestion,"generated_at":datetime.now().isoformat(),"duration":duration}
     save_data(data)
     return suggestion
@@ -349,17 +382,21 @@ COACH NOTE:
 def get_tip(data: dict, api_key: str) -> str:
     user   = data["user"]
     client = Groq(api_key=api_key)
-    resp   = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role":"user","content":
-            f"Give ONE fitness tip (2 sentences). "
-            f"User goal: {user['goal'].replace('_',' ')}. "
-            f"Streak: {user['current_streak']} days. Level: {user['level']}. "
-            f"Be specific and actionable."}],
-        max_tokens=100,
-        temperature=0.8,
-    )
-    return resp.choices[0].message.content
+    try:
+        resp = call_with_retry(
+            client.chat.completions.create,
+            model=MODEL,
+            messages=[{"role":"user","content":
+                f"Give ONE fitness tip (2 sentences). "
+                f"User goal: {user['goal'].replace('_',' ')}. "
+                f"Streak: {user['current_streak']} days. Level: {user['level']}. "
+                f"Be specific and actionable."}],
+            max_tokens=100,
+            temperature=0.8,
+        )
+        return resp.choices[0].message.content
+    except Exception:
+        return FALLBACK_TIP
 
 
 # ─────────────────────────────────────────────────────────────
@@ -485,6 +522,45 @@ def fig_exercise(df_ex: pd.DataFrame, name: str):
 
 
 # ─────────────────────────────────────────────────────────────
+# AUTH — real login/signup with hashed passwords (see db.py)
+# ─────────────────────────────────────────────────────────────
+if "user_id" not in st.session_state:
+    st.markdown("## 💪 FitTracker")
+    st.markdown("### 🔐 Log in or create an account")
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    login_tab, signup_tab = st.tabs(["Log In", "Sign Up"])
+
+    with login_tab:
+        li_user = st.text_input("Username", key="li_user")
+        li_pass = st.text_input("Password", type="password", key="li_pass")
+        if st.button("Log In 🚀", use_container_width=True, key="li_btn"):
+            try:
+                st.session_state.user_id = login_user(li_user, li_pass)
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+    with signup_tab:
+        su_user  = st.text_input("Choose a username", key="su_user")
+        su_pass  = st.text_input("Choose a password", type="password", key="su_pass")
+        su_pass2 = st.text_input("Confirm password", type="password", key="su_pass2")
+        if st.button("Create Account 🚀", use_container_width=True, key="su_btn"):
+            if not su_user.strip() or not su_pass:
+                st.warning("Please fill in a username and password.")
+            elif su_pass != su_pass2:
+                st.warning("Passwords don't match.")
+            elif len(su_pass) < 6:
+                st.warning("Password should be at least 6 characters.")
+            else:
+                try:
+                    st.session_state.user_id = signup_user(su_user, su_pass)
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+    st.stop()
+
+# ─────────────────────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────────────────────
 if "data" not in st.session_state:
@@ -518,33 +594,29 @@ with col_key:
     else:
         api_key = st.text_input("Groq API Key", type="password",
                                 placeholder="gsk_...", label_visibility="collapsed")
+    if st.button("🔒 Log out", use_container_width=True):
+        for k in ("user_id", "data", "workout_result", "exercises", "suggestion"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
-# SETUP SCREEN (first time)
+# SETUP SCREEN (first time for this user — goal only, name's already set)
 # ─────────────────────────────────────────────────────────────
-if not user["name"]:
-    st.markdown("### 👋 Welcome to FitTracker!")
-    st.markdown("Let's set up your profile before we begin.")
+if not user["goal"]:
+    st.markdown(f"### 👋 Welcome, {user['name']}!")
+    st.markdown("One quick thing before we begin — what's your fitness goal?")
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        new_name = st.text_input("Your name", placeholder="Anchal")
-    with c2:
-        new_goal = st.selectbox("Fitness goal", list(VALID_GOALS.values()))
+    new_goal = st.selectbox("Fitness goal", list(VALID_GOALS.values()))
 
     if st.button("Get Started 🚀", use_container_width=True):
-        if new_name.strip():
-            goal_key = [k for k,v in VALID_GOALS.items() if v==new_goal][0]
-            data["user"].update({"name":new_name.strip(),"goal":goal_key,
-                                 "created_at":date.today().isoformat()})
-            save_data(data)
-            st.session_state.data = data
-            st.rerun()
-        else:
-            st.warning("Please enter your name.")
+        goal_key = [k for k,v in VALID_GOALS.items() if v==new_goal][0]
+        data["user"].update({"goal":goal_key,"created_at":date.today().isoformat()})
+        save_data(data)
+        st.session_state.data = data
+        st.rerun()
     st.stop()
 
 # ─────────────────────────────────────────────────────────────
@@ -608,7 +680,9 @@ with tab1:
             result = log_workout(data, st.session_state.exercises, session_dur, notes)
             st.session_state.workout_result = result
             st.session_state.exercises = []
-            st.session_state.data = load_data()
+            # log_workout() mutates `data` in place and already saved it to
+            # MySQL — st.session_state.data IS this same dict, so no reload
+            # needed here (that used to be a full extra DB round-trip).
             st.rerun()
 
     # Result display
@@ -745,7 +819,10 @@ with tab3:
                 try:
                     suggestion = get_suggestion(data, duration, api_key)
                     st.session_state.suggestion = suggestion
-                    st.session_state.data = load_data()
+                    # get_suggestion() already mutated + saved this same
+                    # `data` object (== st.session_state.data) — no reload
+                    # needed. (get_suggestion has its own retry/fallback,
+                    # so this outer except is now just a last-resort guard.)
                 except Exception as e:
                     st.error(f"Error: {e}")
 
