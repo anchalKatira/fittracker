@@ -2,34 +2,46 @@
 db.py — MySQL storage layer for FitTracker
 ===========================================
 Drop-in replacement for the old JSON load_data()/save_data() pair.
-
+ 
 Design goal: keep the exact same in-memory dict shape the rest of
 app.py already expects (user / workouts / badges / latest_suggestion).
 That means calculate_xp, log_workout, check_badges, build_context,
 and every chart function in app.py needs ZERO changes — only the
 storage layer underneath them changed.
-
+ 
 Multi-user model: real accounts — username + bcrypt-hashed password
 (see signup_user()/login_user() below). Whichever user_id that
 resolves to gets stored in st.session_state.user_id, and
 load_data()/save_data() read it from there — so callers don't need
 to pass a user_id around at all; the "current user" is just whoever's
 session it is.
-
+ 
 Config source: checks st.secrets first (how Streamlit Community Cloud
 supplies credentials via its Secrets manager), falling back to
 os.environ (how you supply them locally / via `export`). Same code
 works in both places.
+ 
+Connection strategy: a FRESH connection is opened for every call and
+closed right after (see get_connection() below) — NOT a single
+connection cached and shared across the whole app's lifetime. An
+earlier version cached one connection with st.cache_resource, but
+pymysql connections aren't thread-safe: sharing one across concurrent
+Streamlit sessions let queries interleave on the same socket, which
+MySQL's client library saw as a corrupted/malformed packet. Opening a
+short-lived connection per call costs a little latency but removes
+that whole class of bug — the right tradeoff at this app's scale.
 """
-
+ 
 import os
 import ssl as ssl_module
+from contextlib import contextmanager
+ 
 import pymysql
 import pymysql.cursors
 import bcrypt
 import streamlit as st
-
-
+ 
+ 
 def _cfg(key: str, default: str = "") -> str:
     """st.secrets first (Streamlit Cloud), then os.environ (local)."""
     try:
@@ -38,8 +50,8 @@ def _cfg(key: str, default: str = "") -> str:
     except Exception:
         pass  # no secrets.toml at all — fine for local dev with env vars
     return os.environ.get(key, default)
-
-
+ 
+ 
 def _build_db_config() -> dict:
     cfg = dict(
         host=_cfg("MYSQL_HOST", "localhost"),
@@ -49,6 +61,7 @@ def _build_db_config() -> dict:
         database=_cfg("MYSQL_DATABASE", "fittracker"),
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
+        connect_timeout=10,
     )
     # Hosted MySQL (e.g. TiDB Cloud Starter) requires TLS. Local MySQL
     # doesn't, so this only kicks in when MYSQL_SSL=true is set.
@@ -56,10 +69,10 @@ def _build_db_config() -> dict:
         ctx = ssl_module.create_default_context()
         cfg["ssl"] = ctx
     return cfg
-
-
+ 
+ 
 DB_CONFIG = _build_db_config()
-
+ 
 # Badge metadata (name/description/icon) stays in code, same as before —
 # only the "unlocked" state lives in the DB.
 BADGE_DEFS = {
@@ -69,22 +82,22 @@ BADGE_DEFS = {
     "iron_will":     {"name": "Iron Will",    "description": "Complete 10 workouts",          "icon": "🏋️"},
     "level_up":      {"name": "Level Up",     "description": "Reach Level 5",                 "icon": "⚡"},
 }
-
-
-@st.cache_resource
+ 
+ 
+@contextmanager
 def get_connection():
-    """
-    One connection cached per Streamlit session (via cache_resource),
-    instead of opening a new MySQL connection on every rerun/tab switch.
-    """
-    return pymysql.connect(**DB_CONFIG)
-
-
+    """Open a fresh connection for this call, close it when done."""
+    conn = pymysql.connect(**DB_CONFIG)
+    try:
+        yield conn
+    finally:
+        conn.close()
+ 
+ 
 def init_schema():
     """Create tables if they don't exist yet. No default user is seeded —
     accounts are created via signup_user() below."""
-    conn = get_connection()
-    with conn.cursor() as cur:
+    with get_connection() as conn, conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INT PRIMARY KEY AUTO_INCREMENT,
@@ -110,6 +123,7 @@ def init_schema():
                 pass
             else:
                 raise
+ 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS workouts (
                 id VARCHAR(50) PRIMARY KEY,
@@ -155,31 +169,30 @@ def init_schema():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
-
-
+ 
+ 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-
+ 
+ 
 def verify_password(password: str, password_hash: str) -> bool:
     if not password_hash:
         return False
     return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-
-
+ 
+ 
 def signup_user(username: str, password: str) -> int:
     """
     Create a new account with a bcrypt-hashed password. Raises ValueError
     (safe to show directly to the user) if the username is taken.
     """
     init_schema()
-    conn = get_connection()
     username = username.strip()
-    with conn.cursor() as cur:
+    with get_connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT id FROM users WHERE LOWER(name) = LOWER(%s)", (username,))
         if cur.fetchone():
             raise ValueError("That username is already taken — try logging in instead.")
-
+ 
         pw_hash = hash_password(password)
         cur.execute("INSERT INTO users (name, password_hash) VALUES (%s, %s)", (username, pw_hash))
         user_id = cur.lastrowid
@@ -189,8 +202,8 @@ def signup_user(username: str, password: str) -> int:
                 (user_id, bkey),
             )
         return user_id
-
-
+ 
+ 
 def login_user(username: str, password: str) -> int:
     """
     Verify credentials and return the user_id on success. Raises
@@ -199,28 +212,26 @@ def login_user(username: str, password: str) -> int:
     can't be used to enumerate which usernames exist.
     """
     init_schema()
-    conn = get_connection()
-    with conn.cursor() as cur:
+    with get_connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT id, password_hash FROM users WHERE LOWER(name) = LOWER(%s)", (username.strip(),))
         row = cur.fetchone()
         if not row or not verify_password(password, row["password_hash"]):
             raise ValueError("Incorrect username or password.")
         return row["id"]
-
-
+ 
+ 
 def load_data() -> dict:
     """Rebuild the same nested dict shape the old JSON version returned,
     for whichever user is currently active in this session."""
     init_schema()
     user_id = st.session_state.user_id
-    conn = get_connection()
-    with conn.cursor() as cur:
+    with get_connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
         u = cur.fetchone()
-
+ 
         cur.execute("SELECT * FROM workouts WHERE user_id = %s ORDER BY timestamp", (user_id,))
         workout_rows = cur.fetchall()
-
+ 
         workouts = []
         for w in workout_rows:
             cur.execute("SELECT * FROM workout_exercises WHERE workout_id = %s", (w["id"],))
@@ -245,7 +256,7 @@ def load_data() -> dict:
                 "xp_earned": w["xp_earned"],
                 "total_volume_kg": w["total_volume_kg"],
             })
-
+ 
         cur.execute("SELECT * FROM badges WHERE user_id = %s", (user_id,))
         badge_rows = {b["badge_key"]: b for b in cur.fetchall()}
         badges = {}
@@ -256,7 +267,7 @@ def load_data() -> dict:
                 "unlocked": bool(row.get("unlocked", False)),
                 "unlocked_at": row["unlocked_at"].isoformat() if row.get("unlocked_at") else None,
             }
-
+ 
         cur.execute("SELECT * FROM latest_suggestion WHERE user_id = %s", (user_id,))
         sug = cur.fetchone()
         latest_suggestion = None
@@ -266,7 +277,7 @@ def load_data() -> dict:
                 "generated_at": sug["generated_at"].isoformat(),
                 "duration": sug["duration"],
             }
-
+ 
     return {
         "user": {
             "name": u["name"],
@@ -283,8 +294,8 @@ def load_data() -> dict:
         "badges": badges,
         "latest_suggestion": latest_suggestion,
     }
-
-
+ 
+ 
 def save_data(data: dict) -> None:
     """
     Persist the full in-memory dict back to MySQL, for the current
@@ -292,10 +303,9 @@ def save_data(data: dict) -> None:
     so we only insert ones not already in the DB — everything else is
     an update.
     """
-    conn = get_connection()
     user_id = st.session_state.user_id
     u = data["user"]
-    with conn.cursor() as cur:
+    with get_connection() as conn, conn.cursor() as cur:
         cur.execute("""
             UPDATE users SET name=%s, goal=%s, created_at=%s, total_xp=%s, level=%s,
                 current_streak=%s, longest_streak=%s, total_workouts=%s, last_workout_date=%s
@@ -305,10 +315,10 @@ def save_data(data: dict) -> None:
             u["current_streak"], u["longest_streak"], u["total_workouts"],
             u["last_workout_date"], user_id,
         ))
-
+ 
         cur.execute("SELECT id FROM workouts WHERE user_id = %s", (user_id,))
         existing_ids = {r["id"] for r in cur.fetchall()}
-
+ 
         for w in data["workouts"]:
             if w["id"] in existing_ids:
                 continue
@@ -329,13 +339,13 @@ def save_data(data: dict) -> None:
                     w["id"], ex["name"], ex["muscle_group"], ex["sets"], ex["reps"],
                     ex["weight_kg"], ex.get("duration_minutes", 0),
                 ))
-
+ 
         for bkey, b in data["badges"].items():
             cur.execute("""
                 UPDATE badges SET unlocked=%s, unlocked_at=%s
                 WHERE user_id=%s AND badge_key=%s
             """, (b["unlocked"], b["unlocked_at"], user_id, bkey))
-
+ 
         ls = data.get("latest_suggestion")
         if ls:
             cur.execute("""
@@ -346,3 +356,4 @@ def save_data(data: dict) -> None:
                 user_id, ls["text"], ls["generated_at"], ls["duration"],
                 ls["text"], ls["generated_at"], ls["duration"],
             ))
+ 
