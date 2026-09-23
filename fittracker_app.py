@@ -6,25 +6,25 @@ Tabs:
   2. 🏆 Dashboard (XP, streak, badges)
   3. 🤖 AI Coach (Groq suggestions)
   4. 📊 Analytics (Plotly charts)
-
+ 
 """
-
+ 
 import os
 import math
 import time
 import streamlit as st
 from datetime import datetime, date, timedelta
 from typing import Optional
-
+ 
 # ── Third-party ───────────────────────────────────────────────
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from groq import Groq
-
+ 
 # ── Storage layer (MySQL — see db.py) ────────────────────────
 from db import load_data, save_data, signup_user, login_user
-
+ 
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────
@@ -34,37 +34,37 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
+ 
 # ─────────────────────────────────────────────────────────────
 # CSS
 # ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono&display=swap');
-
+ 
 :root {
   --bg:#0f0f11; --surface:#18181c; --border:#2a2a32;
   --accent:#6c63ff; --accent2:#a78bfa;
   --text:#e8e8f0; --muted:#72728a;
   --green:#34d399; --yellow:#fbbf24; --red:#f87171; --blue:#60a5fa;
 }
-
+ 
 html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text)}
 #MainMenu,footer,header{visibility:hidden}
 .main .block-container{padding-top:1.25rem;padding-bottom:2rem;max-width:1000px}
-
+ 
 /* Metric cards */
 .metric-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:1.25rem}
 .metric-card{background:var(--surface);border:0.5px solid var(--border);border-radius:12px;padding:.85rem 1rem;text-align:center}
 .metric-val{font-size:1.6rem;font-weight:600;color:var(--text);line-height:1.1}
 .metric-label{font-size:.72rem;color:var(--muted);margin-top:3px;text-transform:uppercase;letter-spacing:.06em}
-
+ 
 /* XP bar */
 .xp-bar-wrap{background:var(--surface);border:0.5px solid var(--border);border-radius:12px;padding:1rem 1.25rem;margin-bottom:12px}
 .xp-bar-track{height:10px;background:var(--border);border-radius:5px;overflow:hidden;margin:8px 0 4px}
 .xp-bar-fill{height:100%;border-radius:5px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s}
 .xp-label{display:flex;justify-content:space-between;font-size:.78rem;color:var(--muted)}
-
+ 
 /* Badge grid */
 .badge-grid{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:1rem}
 .badge-card{background:var(--surface);border:0.5px solid var(--border);border-radius:10px;padding:.65rem .9rem;display:flex;align-items:center;gap:8px;font-size:13px}
@@ -72,30 +72,30 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:var(--bg);c
 .badge-icon{font-size:1.25rem}
 .badge-name{font-weight:500;color:var(--text)}
 .badge-desc{font-size:.72rem;color:var(--muted)}
-
+ 
 /* Section headers */
 .section-title{font-size:1rem;font-weight:500;color:var(--text);margin:1rem 0 .6rem;border-bottom:.5px solid var(--border);padding-bottom:.4rem}
 .divider{height:1px;background:var(--border);margin:.9rem 0}
-
+ 
 /* Coach box */
 .coach-box{background:var(--surface);border:0.5px solid var(--accent);border-radius:12px;padding:1rem 1.25rem;margin:10px 0;font-size:.9rem;line-height:1.75;white-space:pre-wrap}
 .coach-label{font-size:.72rem;font-weight:600;color:var(--accent2);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
-
+ 
 /* Buttons */
 .stButton>button{background:var(--surface);border:.5px solid var(--border);color:var(--text);border-radius:8px;font-family:'DM Sans',sans-serif;transition:all .15s}
 .stButton>button:hover{border-color:var(--accent);color:var(--accent2)}
-
+ 
 /* Streak flame */
 .streak-display{font-size:2.5rem;text-align:center;margin:.3rem 0}
 .streak-num{font-size:2rem;font-weight:600;color:var(--yellow)}
 .streak-label{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
-
+ 
 /* Success toast */
 .toast{background:#052e16;border:.5px solid #065f46;border-radius:10px;padding:.75rem 1rem;color:var(--green);font-size:.9rem;margin:8px 0}
 </style>
 """, unsafe_allow_html=True)
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────
@@ -105,27 +105,27 @@ XP_PER_WORKOUT   = 10
 XP_PER_5_MINS    = 1
 XP_PER_500KG     = 1
 XP_STREAK_BONUS  = 5
-
+ 
 VALID_GOALS = {
     "muscle_gain":     "Muscle Gain",
     "weight_loss":     "Weight Loss",
     "endurance":       "Endurance",
     "general_fitness": "General Fitness",
 }
-
+ 
 MUSCLE_GROUPS = ["chest","back","legs","shoulders","arms","core","cardio"]
-
+ 
 COLORS = {
     "primary":"#6c63ff","success":"#34d399","warning":"#fbbf24",
     "danger":"#f87171","muted":"#72728a","bg":"#0f0f11",
     "surface":"#18181c","border":"#2a2a32","text":"#e8e8f0",
 }
-
+ 
 MUSCLE_COLORS = {
     "chest":"#6c63ff","back":"#34d399","legs":"#fbbf24",
     "shoulders":"#f87171","arms":"#60a5fa","core":"#a78bfa","cardio":"#fb923c",
 }
-
+ 
 # Kept purely as a readable reference for the data shape db.py builds —
 # actual initialization now happens in db.py's init_schema().
 EMPTY_DB = {
@@ -145,23 +145,23 @@ EMPTY_DB = {
     },
     "latest_suggestion": None,
 }
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # STORAGE
 # ─────────────────────────────────────────────────────────────
 # load_data() / save_data() now come from db.py (MySQL-backed) —
 # same function names, same return shape, so nothing below this
 # line needed to change at all.
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # GAMIFICATION ENGINE
 # ─────────────────────────────────────────────────────────────
 def calculate_volume(exercises: list) -> float:
     return round(sum(ex["weight_kg"] * ex["sets"] * ex["reps"] for ex in exercises), 2)
-
-
+ 
+ 
 def calculate_xp(duration: int, exercises: list, streak: int) -> dict:
     base    = XP_PER_WORKOUT
     dur_xp  = (duration // 5) * XP_PER_5_MINS
@@ -169,16 +169,16 @@ def calculate_xp(duration: int, exercises: list, streak: int) -> dict:
     str_xp  = XP_STREAK_BONUS if streak >= 3 else 0
     return {"base":base,"duration":dur_xp,"volume":vol_xp,"streak":str_xp,
             "total":base+dur_xp+vol_xp+str_xp}
-
-
+ 
+ 
 def calculate_level(xp: int) -> int:
     return math.floor(xp / XP_PER_LEVEL) + 1
-
-
+ 
+ 
 def xp_to_next(xp: int) -> int:
     return calculate_level(xp) * XP_PER_LEVEL - xp
-
-
+ 
+ 
 def update_streak(last_date_str: Optional[str], current: int) -> dict:
     today = date.today()
     if last_date_str is None:
@@ -190,8 +190,8 @@ def update_streak(last_date_str: Optional[str], current: int) -> dict:
         return {"new":current+1,"msg":f"Streak extended to {current+1} days! 🔥","extended":True}
     else:
         return {"new":1,"msg":f"Streak reset — missed {gap-1} day(s). Starting fresh!","extended":False}
-
-
+ 
+ 
 def check_badges(user: dict, data: dict) -> list:
     conditions = {
         "first_workout": lambda u: u["total_workouts"] >= 1,
@@ -207,8 +207,8 @@ def check_badges(user: dict, data: dict) -> list:
             data["badges"][bid]["unlocked_at"] = datetime.now().isoformat()
             newly.append(data["badges"][bid]["name"])
     return newly
-
-
+ 
+ 
 def log_workout(data: dict, exercises: list, duration: int, notes: str = "") -> dict:
     user   = data["user"]
     xp_d   = calculate_xp(duration, exercises, user["current_streak"])
@@ -216,7 +216,7 @@ def log_workout(data: dict, exercises: list, duration: int, notes: str = "") -> 
     str_d  = update_streak(user["last_workout_date"], user["current_streak"])
     new_lv = calculate_level(new_xp)
     now    = datetime.now()
-
+ 
     workout = {
         "id":               f"workout_{now.strftime('%Y%m%d_%H%M%S')}",
         "date":             date.today().isoformat(),
@@ -228,7 +228,7 @@ def log_workout(data: dict, exercises: list, duration: int, notes: str = "") -> 
         "total_volume_kg":  calculate_volume(exercises),
     }
     data["workouts"].append(workout)
-
+ 
     new_total = user["total_workouts"] + 1
     data["user"].update({
         "total_xp":          new_xp,
@@ -238,10 +238,10 @@ def log_workout(data: dict, exercises: list, duration: int, notes: str = "") -> 
         "total_workouts":    new_total,
         "last_workout_date": date.today().isoformat(),
     })
-
+ 
     newly = check_badges(data["user"], data)
     save_data(data)
-
+ 
     return {
         "xp_earned":       xp_d["total"],
         "xp_breakdown":    xp_d,
@@ -253,8 +253,8 @@ def log_workout(data: dict, exercises: list, duration: int, notes: str = "") -> 
         "badges_unlocked": newly,
         "volume_kg":       workout["total_volume_kg"],
     }
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # AI COACH
 # ─────────────────────────────────────────────────────────────
@@ -265,8 +265,8 @@ def get_groq_key() -> str:
     except Exception:
         pass
     return os.environ.get("GROQ_API_KEY","")
-
-
+ 
+ 
 def call_with_retry(fn, *args, max_retries: int = 2, backoff: float = 1.5, **kwargs):
     """
     Retry a flaky call (rate limit, timeout, transient network error) a
@@ -282,27 +282,27 @@ def call_with_retry(fn, *args, max_retries: int = 2, backoff: float = 1.5, **kwa
             if attempt < max_retries:
                 time.sleep(backoff * (attempt + 1))
     raise last_err
-
-
+ 
+ 
 FALLBACK_SUGGESTION = """SESSION FOCUS: Full Body (AI coach unavailable — showing a safe default plan)
-
+ 
 WARM UP (5 mins):
 - Jumping jacks / light jog: 5 min
-
+ 
 MAIN WORKOUT:
 - Bodyweight squats: 3×15 — Easy — Focus on depth and form
 - Push-ups: 3×10 — Medium — Keep core braced
 - Plank: 3×30s — Medium — Breathe steadily, don't hold your breath
-
+ 
 COOL DOWN (5 mins):
 - Full-body static stretch: 5 min
-
+ 
 COACH NOTE:
 Couldn't reach the AI coach right now, so this is a general safe session instead of a personalized one. Try generating a plan again in a bit — your data hasn't been lost."""
-
+ 
 FALLBACK_TIP = "Couldn't reach the AI coach right now — but a good rule of thumb: consistency beats intensity, so a shorter workout today still keeps your streak alive."
-
-
+ 
+ 
 def build_context(data: dict) -> str:
     user     = data["user"]
     workouts = list(reversed(data["workouts"]))
@@ -314,7 +314,7 @@ def build_context(data: dict) -> str:
     }
     ctx  = f"USER: {user['name']} | Goal: {user['goal'].replace('_',' ').title()} ({goal_map.get(user['goal'],'fitness')})\n"
     ctx += f"Level: {user['level']} | XP: {user['total_xp']} | Streak: {user['current_streak']} days | Workouts: {user['total_workouts']}\n\n"
-
+ 
     if workouts:
         ctx += "RECENT SESSIONS (last 3):\n"
         for i,w in enumerate(workouts[:3]):
@@ -323,42 +323,42 @@ def build_context(data: dict) -> str:
             for ex in w["exercises"]:
                 if ex["weight_kg"] > 0:
                     ctx += f"    · {ex['name']}: {ex['sets']}×{ex['reps']} @ {ex['weight_kg']}kg\n"
-
+ 
         recent_muscles = set(ex["muscle_group"] for w in workouts[:3] for ex in w["exercises"])
         rested = set(MUSCLE_GROUPS) - recent_muscles
         ctx += f"\nRESTED MUSCLES: {', '.join(sorted(rested)) if rested else 'all trained recently'}\n"
     else:
         ctx += "No workouts logged yet.\n"
-
+ 
     return ctx
-
-
+ 
+ 
 def get_suggestion(data: dict, duration: int, api_key: str) -> str:
     client = Groq(api_key=api_key)
     ctx    = build_context(data)
     prompt = f"""You are an expert personal trainer.
-
+ 
 {ctx}
-
+ 
 Suggest a complete {duration}-minute workout for the NEXT session.
 Focus on rested muscles. Match the user's goal.
 For muscle_gain: include progressive overload notes.
-
+ 
 FORMAT:
 SESSION FOCUS: [muscles]
-
+ 
 WARM UP (5 mins):
 - [exercise]: [duration]
-
+ 
 MAIN WORKOUT:
 - [Exercise]: [sets]×[reps] @ [weight]kg — [Easy/Medium/Hard] — [tip]
-
+ 
 COOL DOWN (5 mins):
 - [stretch]
-
+ 
 COACH NOTE:
 [2-3 sentences of personalized advice]"""
-
+ 
     try:
         resp = call_with_retry(
             client.chat.completions.create,
@@ -371,14 +371,15 @@ COACH NOTE:
             temperature=0.7,
         )
         suggestion = resp.choices[0].message.content
-    except Exception:
+    except Exception as e:
+        st.session_state["_last_groq_error"] = f"{type(e).__name__}: {e}"
         suggestion = FALLBACK_SUGGESTION
-
+ 
     data["latest_suggestion"] = {"text":suggestion,"generated_at":datetime.now().isoformat(),"duration":duration}
     save_data(data)
     return suggestion
-
-
+ 
+ 
 def get_tip(data: dict, api_key: str) -> str:
     user   = data["user"]
     client = Groq(api_key=api_key)
@@ -395,10 +396,11 @@ def get_tip(data: dict, api_key: str) -> str:
             temperature=0.8,
         )
         return resp.choices[0].message.content
-    except Exception:
+    except Exception as e:
+        st.session_state["_last_groq_error"] = f"{type(e).__name__}: {e}"
         return FALLBACK_TIP
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # ANALYTICS CHARTS
 # ─────────────────────────────────────────────────────────────
@@ -407,8 +409,8 @@ BASE_LAYOUT = dict(
     font=dict(color=COLORS["text"],family="DM Sans",size=12),
     margin=dict(l=40,r=20,t=50,b=40),
 )
-
-
+ 
+ 
 def workouts_df(workouts: list) -> pd.DataFrame:
     if not workouts:
         return pd.DataFrame()
@@ -424,8 +426,8 @@ def workouts_df(workouts: list) -> pd.DataFrame:
     df["week"]     = df["date"].dt.strftime("Wk %W")
     df["day_name"] = df["date"].dt.strftime("%d %b")
     return df
-
-
+ 
+ 
 def exercises_df(workouts: list) -> pd.DataFrame:
     rows = []
     for w in workouts:
@@ -435,8 +437,8 @@ def exercises_df(workouts: list) -> pd.DataFrame:
                          "reps":ex["reps"],"weight_kg":ex["weight_kg"],
                          "volume":ex["sets"]*ex["reps"]*ex["weight_kg"]})
     return pd.DataFrame(rows) if rows else pd.DataFrame()
-
-
+ 
+ 
 def fig_frequency(df: pd.DataFrame):
     if df.empty: return None
     wk = df.groupby("week").size().reset_index(name="sessions")
@@ -450,8 +452,8 @@ def fig_frequency(df: pd.DataFrame):
         xaxis=dict(gridcolor=COLORS["border"],showgrid=False),
         yaxis=dict(title="Sessions",gridcolor=COLORS["border"],dtick=1))
     return fig
-
-
+ 
+ 
 def fig_volume(df: pd.DataFrame):
     if df.empty: return None
     ds = df.sort_values("date")
@@ -468,8 +470,8 @@ def fig_volume(df: pd.DataFrame):
         xaxis=dict(tickangle=-30,gridcolor=COLORS["border"]),
         yaxis=dict(title="Volume (kg)",gridcolor=COLORS["border"]))
     return fig
-
-
+ 
+ 
 def fig_muscle(df_ex: pd.DataFrame):
     if df_ex.empty: return None
     mc = df_ex["muscle_group"].value_counts().reset_index()
@@ -480,8 +482,8 @@ def fig_muscle(df_ex: pd.DataFrame):
         hovertemplate="<b>%{label}</b><br>Exercises: %{value}<br>%{percent}<extra></extra>"))
     fig.update_layout(**BASE_LAYOUT,title="Muscle Group Distribution",showlegend=True)
     return fig
-
-
+ 
+ 
 def fig_xp(df: pd.DataFrame):
     if df.empty: return None
     ds = df.sort_values("date")
@@ -501,8 +503,8 @@ def fig_xp(df: pd.DataFrame):
         xaxis=dict(tickangle=-30,gridcolor=COLORS["border"]),
         yaxis=dict(title="Cumulative XP",gridcolor=COLORS["border"]))
     return fig
-
-
+ 
+ 
 def fig_exercise(df_ex: pd.DataFrame, name: str):
     if df_ex.empty or not name: return None
     filtered = df_ex[df_ex["name"].str.lower()==name.lower()]
@@ -519,8 +521,8 @@ def fig_exercise(df_ex: pd.DataFrame, name: str):
         xaxis=dict(gridcolor=COLORS["border"]),
         yaxis=dict(title="Weight (kg)",gridcolor=COLORS["border"]))
     return fig
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # AUTH — real login/signup with hashed passwords (see db.py)
 # ─────────────────────────────────────────────────────────────
@@ -528,9 +530,9 @@ if "user_id" not in st.session_state:
     st.markdown("## 💪 FitTracker")
     st.markdown("### 🔐 Log in or create an account")
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
+ 
     login_tab, signup_tab = st.tabs(["Log In", "Sign Up"])
-
+ 
     with login_tab:
         li_user = st.text_input("Username", key="li_user")
         li_pass = st.text_input("Password", type="password", key="li_pass")
@@ -540,7 +542,7 @@ if "user_id" not in st.session_state:
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
-
+ 
     with signup_tab:
         su_user  = st.text_input("Choose a username", key="su_user")
         su_pass  = st.text_input("Choose a password", type="password", key="su_pass")
@@ -559,7 +561,7 @@ if "user_id" not in st.session_state:
                 except ValueError as e:
                     st.error(str(e))
     st.stop()
-
+ 
 # ─────────────────────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────────────────────
@@ -571,18 +573,18 @@ if "exercises" not in st.session_state:
     st.session_state.exercises = []
 if "suggestion" not in st.session_state:
     st.session_state.suggestion = None
-
-
+ 
+ 
 def refresh():
     st.session_state.data = load_data()
-
-
+ 
+ 
 # ─────────────────────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────────────────────
 data = st.session_state.data
 user = data["user"]
-
+ 
 col_title, col_key = st.columns([3, 1])
 with col_title:
     name_display = user["name"] if user["name"] else "FitTracker"
@@ -598,9 +600,9 @@ with col_key:
         for k in ("user_id", "data", "workout_result", "exercises", "suggestion"):
             st.session_state.pop(k, None)
         st.rerun()
-
+ 
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
+ 
 # ─────────────────────────────────────────────────────────────
 # SETUP SCREEN (first time for this user — goal only, name's already set)
 # ─────────────────────────────────────────────────────────────
@@ -608,9 +610,9 @@ if not user["goal"]:
     st.markdown(f"### 👋 Welcome, {user['name']}!")
     st.markdown("One quick thing before we begin — what's your fitness goal?")
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
+ 
     new_goal = st.selectbox("Fitness goal", list(VALID_GOALS.values()))
-
+ 
     if st.button("Get Started 🚀", use_container_width=True):
         goal_key = [k for k,v in VALID_GOALS.items() if v==new_goal][0]
         data["user"].update({"goal":goal_key,"created_at":date.today().isoformat()})
@@ -618,19 +620,19 @@ if not user["goal"]:
         st.session_state.data = data
         st.rerun()
     st.stop()
-
+ 
 # ─────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs(["🏋️ Log Workout","🏆 Dashboard","🤖 AI Coach","📊 Analytics"])
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════
 # TAB 1 — LOG WORKOUT
 # ══════════════════════════════════════════════════════════════
 with tab1:
     st.markdown('<div class="section-title">Add Exercise</div>', unsafe_allow_html=True)
-
+ 
     c1, c2, c3 = st.columns(3)
     with c1:
         ex_name    = st.text_input("Exercise name", placeholder="Bench Press")
@@ -643,14 +645,16 @@ with tab1:
                                      value=0.0, step=2.5)
         dur_ex     = st.number_input("Duration (min, for cardio)",
                                      min_value=0, max_value=120, value=0)
-
+ 
     if st.button("➕ Add Exercise", use_container_width=True):
         if ex_name.strip():
             st.session_state.exercises.append({
                 "name":ex_name.strip(),"muscle_group":muscle_grp,
                 "sets":sets,"reps":reps,"weight_kg":weight,"duration_minutes":dur_ex
             })
-
+        else:
+            st.warning("Enter an exercise name first.")
+ 
     # Exercise list
     if st.session_state.exercises:
         st.markdown('<div class="section-title">This Session</div>', unsafe_allow_html=True)
@@ -667,7 +671,7 @@ with tab1:
                 if st.button("🗑️", key=f"rm_{i}"):
                     st.session_state.exercises.pop(i)
                     st.rerun()
-
+ 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
         c_dur, c_notes = st.columns(2)
         with c_dur:
@@ -675,7 +679,7 @@ with tab1:
                                           min_value=5, max_value=300, value=45)
         with c_notes:
             notes = st.text_input("Notes (optional)", placeholder="Felt strong today")
-
+ 
         if st.button("✅ Log Workout", use_container_width=True, type="primary"):
             result = log_workout(data, st.session_state.exercises, session_dur, notes)
             st.session_state.workout_result = result
@@ -684,7 +688,7 @@ with tab1:
             # MySQL — st.session_state.data IS this same dict, so no reload
             # needed here (that used to be a full extra DB round-trip).
             st.rerun()
-
+ 
     # Result display
     if st.session_state.workout_result:
         r = st.session_state.workout_result
@@ -704,7 +708,7 @@ with tab1:
         if st.button("Clear"):
             st.session_state.workout_result = None
             st.rerun()
-
+ 
     if not st.session_state.exercises and not st.session_state.workout_result:
         st.markdown("""
         <div style='text-align:center;padding:2.5rem 0;color:#72728a'>
@@ -713,15 +717,15 @@ with tab1:
           <div style='font-size:.85rem'>Fill in the form above and click Add Exercise</div>
         </div>
         """, unsafe_allow_html=True)
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════
 # TAB 2 — DASHBOARD
 # ══════════════════════════════════════════════════════════════
 with tab2:
     data = st.session_state.data
     user = data["user"]
-
+ 
     # XP bar
     xp_pct = ((user["total_xp"] % XP_PER_LEVEL) / XP_PER_LEVEL) * 100
     st.markdown(f"""
@@ -737,7 +741,7 @@ with tab2:
       </div>
     </div>
     """, unsafe_allow_html=True)
-
+ 
     # Stats row
     st.markdown(f"""
     <div class="metric-row">
@@ -748,12 +752,12 @@ with tab2:
       <div class="metric-card"><div class="metric-val">{user['level']}</div><div class="metric-label">Level</div></div>
     </div>
     """, unsafe_allow_html=True)
-
+ 
     # Badges
     st.markdown('<div class="section-title">Badges</div>', unsafe_allow_html=True)
     unlocked = [b for b in data["badges"].values() if b["unlocked"]]
     locked   = [b for b in data["badges"].values() if not b["unlocked"]]
-
+ 
     badge_html = '<div class="badge-grid">'
     for b in unlocked:
         badge_html += f'<div class="badge-card unlocked"><div class="badge-icon">{b["icon"]}</div><div><div class="badge-name">{b["name"]}</div><div class="badge-desc">{b["description"]}</div></div></div>'
@@ -761,7 +765,7 @@ with tab2:
         badge_html += f'<div class="badge-card"><div class="badge-icon" style="opacity:.3">{b["icon"]}</div><div><div class="badge-name" style="color:#72728a">{b["name"]}</div><div class="badge-desc">{b["description"]}</div></div></div>'
     badge_html += '</div>'
     st.markdown(badge_html, unsafe_allow_html=True)
-
+ 
     # Recent workouts
     if data["workouts"]:
         st.markdown('<div class="section-title">Recent Workouts</div>', unsafe_allow_html=True)
@@ -775,18 +779,21 @@ with tab2:
                         st.markdown(f"- **{ex['name']}**: {ex['sets']}×{ex['reps']} bodyweight")
                 if w.get("notes"):
                     st.caption(f"📝 {w['notes']}")
-
+ 
     if st.button("🔄 Refresh", use_container_width=False):
         st.session_state.data = load_data()
         st.rerun()
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════
 # TAB 3 — AI COACH
 # ══════════════════════════════════════════════════════════════
 with tab3:
     data = st.session_state.data
-
+ 
+    if st.session_state.get("_last_groq_error"):
+        st.caption(f"⚠️ Debug — last Groq error: {st.session_state['_last_groq_error']}")
+ 
     if not api_key:
         st.info("Enter your Groq API key at the top of the page to use the AI Coach.")
     else:
@@ -799,9 +806,9 @@ with tab3:
                     st.markdown(f'<div class="coach-box">{tip}</div>', unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"Error: {e}")
-
+ 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-
+ 
         # Workout suggestion
         st.markdown('<div class="section-title">🤖 Next Session Plan</div>', unsafe_allow_html=True)
         c1, c2 = st.columns([1,2])
@@ -813,7 +820,7 @@ with tab3:
             Goal: <b style="color:#e8e8f0">{VALID_GOALS.get(data['user']['goal'],'—')}</b><br>
             Streak: <b style="color:#e8e8f0">{data['user']['current_streak']} days</b>
             </div>""", unsafe_allow_html=True)
-
+ 
         if st.button("Generate Workout Plan 🚀", use_container_width=True, type="primary"):
             with st.spinner("Your AI coach is building your plan..."):
                 try:
@@ -825,7 +832,7 @@ with tab3:
                     # so this outer except is now just a last-resort guard.)
                 except Exception as e:
                     st.error(f"Error: {e}")
-
+ 
         # Show suggestion
         if st.session_state.suggestion:
             st.markdown('<div class="coach-label">Your Plan</div>', unsafe_allow_html=True)
@@ -836,8 +843,8 @@ with tab3:
             st.markdown('<div class="coach-label">Last Generated Plan</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="coach-box">{ls["text"]}</div>', unsafe_allow_html=True)
             st.caption(f"Generated: {ls['generated_at'][:10]}")
-
-
+ 
+ 
 # ══════════════════════════════════════════════════════════════
 # TAB 4 — ANALYTICS
 # ══════════════════════════════════════════════════════════════
@@ -845,7 +852,7 @@ with tab4:
     data     = st.session_state.data
     df_w     = workouts_df(data["workouts"])
     df_ex    = exercises_df(data["workouts"])
-
+ 
     if df_w.empty:
         st.markdown("""
         <div style='text-align:center;padding:3rem 0;color:#72728a'>
@@ -860,7 +867,7 @@ with tab4:
         avg_dur   = df_w["duration_minutes"].mean()
         top_muscle = df_ex["muscle_group"].value_counts().index[0].title() if not df_ex.empty else "—"
         max_weight = df_ex[df_ex["weight_kg"]>0]["weight_kg"].max() if not df_ex.empty else 0
-
+ 
         st.markdown(f"""
         <div class="metric-row">
           <div class="metric-card"><div class="metric-val">{int(total_vol):,}</div><div class="metric-label">Total kg lifted</div></div>
@@ -869,7 +876,7 @@ with tab4:
           <div class="metric-card"><div class="metric-val">{max_weight:.0f} kg</div><div class="metric-label">Heaviest Lift</div></div>
         </div>
         """, unsafe_allow_html=True)
-
+ 
         # Charts — 2 column layout
         c1, c2 = st.columns(2)
         with c1:
@@ -878,13 +885,13 @@ with tab4:
         with c2:
             f = fig_muscle(df_ex)
             if f: st.plotly_chart(f, use_container_width=True)
-
+ 
         f = fig_volume(df_w)
         if f: st.plotly_chart(f, use_container_width=True)
-
+ 
         f = fig_xp(df_w)
         if f: st.plotly_chart(f, use_container_width=True)
-
+ 
         # Exercise progression picker
         if not df_ex.empty:
             weighted = df_ex[df_ex["weight_kg"]>0]["name"].unique().tolist()
@@ -894,3 +901,4 @@ with tab4:
                 chosen = st.selectbox("Pick an exercise", sorted(weighted))
                 f = fig_exercise(df_ex, chosen)
                 if f: st.plotly_chart(f, use_container_width=True)
+ 
