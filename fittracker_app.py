@@ -99,7 +99,7 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:var(--bg);c
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────
-MODEL            = "llama-3.1-8b-instant"
+MODEL            = "openai/gpt-oss-20b"
 XP_PER_LEVEL     = 50
 XP_PER_WORKOUT   = 10
 XP_PER_5_MINS    = 1
@@ -371,8 +371,7 @@ COACH NOTE:
             temperature=0.7,
         )
         suggestion = resp.choices[0].message.content
-    except Exception as e:
-        st.session_state["_last_groq_error"] = f"{type(e).__name__}: {e}"
+    except Exception:
         suggestion = FALLBACK_SUGGESTION
  
     data["latest_suggestion"] = {"text":suggestion,"generated_at":datetime.now().isoformat(),"duration":duration}
@@ -396,8 +395,7 @@ def get_tip(data: dict, api_key: str) -> str:
             temperature=0.8,
         )
         return resp.choices[0].message.content
-    except Exception as e:
-        st.session_state["_last_groq_error"] = f"{type(e).__name__}: {e}"
+    except Exception:
         return FALLBACK_TIP
  
  
@@ -790,9 +788,6 @@ with tab2:
 # ══════════════════════════════════════════════════════════════
 with tab3:
     data = st.session_state.data
- 
-    if st.session_state.get("_last_groq_error"):
-        st.caption(f"⚠️ Debug — last Groq error: {st.session_state['_last_groq_error']}")
  
     if not api_key:
         st.info("Enter your Groq API key at the top of the page to use the AI Coach.")
